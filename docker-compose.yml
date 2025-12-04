@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  dia-tts:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dia-tts:latest
+    container_name: dia-tts
+    
+    # GPU support - requires nvidia-docker or Docker with NVIDIA Container Runtime
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # Environment variables
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+    
+    # Volumes for persistent data
+    volumes:
+      - ./outputs:/app/outputs
+      - model-cache:/root/.cache/huggingface
+    
+    # Port mapping for Gradio web interface and FastAPI
+    ports:
+      - "7860:7860"
+      - "8000:8000"
+    
+    # Keep container running for interactive use
+    stdin_open: true
+    tty: true
+    
+    # Override default command (optional)
+    # Uncomment to run the Gradio app instead
+    # command: python app.py
+    
+    # Uncomment to run CLI
+    # command: python cli.py --help
+
+volumes:
+  model-cache:
+    driver: local
