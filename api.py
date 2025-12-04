@@ -261,6 +261,50 @@ async def generate_speech(request: TTSRequest):
         
         logger.info(f"Audio validation: shape={full_audio.shape}, dtype={full_audio.dtype}, size={full_audio.size}")
         
+        # Fix audio shape: soundfile expects (samples, channels) format
+        # We're concatenating along the last axis, so if segments are (channels, samples),
+        # the result is (channels, total_samples), which needs to be transposed to (total_samples, channels)
+        if full_audio.ndim == 1:
+            # 1D array (samples,) - convert to 2D (samples, 1) for mono
+            # This ensures soundfile can access shape[1] for channels
+            full_audio = full_audio[:, np.newaxis]
+            logger.info(f"Converted 1D audio to 2D mono format: {full_audio.shape}")
+        elif full_audio.ndim == 2:
+            # 2D array - need to determine if it's (channels, samples) or (samples, channels)
+            # soundfile.write() expects (samples, channels)
+            # Since we concatenated along axis=-1 with shape (channels, samples),
+            # we likely have (channels, samples) and need to transpose
+            dim0, dim1 = full_audio.shape
+            # Heuristic: if first dim is small (1-2 channels) and second is much larger (samples),
+            # it's likely (channels, samples) - transpose it
+            # Also check: if dim0 < dim1 and dim0 <= 2, likely (channels, samples)
+            if dim0 < dim1 and dim0 <= 2:
+                full_audio = full_audio.T
+                logger.info(f"Transposed audio from ({dim0}, {dim1}) to ({full_audio.shape[0]}, {full_audio.shape[1]})")
+            elif dim1 < dim0 and dim1 <= 2:
+                # Already (samples, channels) format
+                logger.debug(f"Audio already in correct format (samples, channels): {full_audio.shape}")
+            else:
+                # Ambiguous case - try to infer from typical audio dimensions
+                # Audio samples are usually much larger than channels
+                # If dim0 is much smaller, assume (channels, samples)
+                if dim0 < dim1:
+                    full_audio = full_audio.T
+                    logger.info(f"Transposed ambiguous shape ({dim0}, {dim1}) to ({full_audio.shape[0]}, {full_audio.shape[1]})")
+        else:
+            logger.warning(f"Unexpected audio dimensions: {full_audio.ndim}, shape: {full_audio.shape}")
+            # Try to reshape to 2D
+            if full_audio.ndim > 2:
+                # Flatten to 2D, keeping the last dimension
+                full_audio = full_audio.reshape(-1, full_audio.shape[-1])
+                logger.info(f"Reshaped multi-dimensional audio to: {full_audio.shape}")
+                # Now check if we need to transpose
+                if full_audio.shape[0] < full_audio.shape[1] and full_audio.shape[0] <= 2:
+                    full_audio = full_audio.T
+                    logger.info(f"Transposed after reshape: {full_audio.shape}")
+        
+        logger.info(f"Final audio shape for saving: {full_audio.shape}")
+        
         # Convert back to torch tensor if model.save_audio expects it
         # Try to match the format that model.generate() returns
         audio_for_save = full_audio
