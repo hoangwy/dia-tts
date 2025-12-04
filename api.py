@@ -189,12 +189,21 @@ async def generate_speech(request: TTSRequest):
             # Generate audio for chunk
             segment = model.generate(
                 chunk,
-                guidance_scale=request.guidance_scale,
+                cfg_scale=request.guidance_scale,
                 temperature=request.temperature,
                 top_p=request.top_p,
-                top_k=request.top_k,
-                max_new_tokens=request.max_new_tokens
+                max_tokens=request.max_new_tokens,
+                cfg_filter_top_k=request.top_k
             )
+            
+            # Convert numpy array to tensor if needed
+            import torch
+            import numpy as np
+            if isinstance(segment, np.ndarray):
+                segment = torch.from_numpy(segment)
+            if segment.dim() == 1:
+                segment = segment.unsqueeze(0)
+                
             audio_segments.append(segment)
             
         # Concatenate audio segments
