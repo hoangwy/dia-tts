@@ -196,20 +196,25 @@ async def generate_speech(request: TTSRequest):
                 cfg_filter_top_k=request.top_k
             )
             
-            # Convert numpy array to tensor if needed
-            import torch
+            # Ensure segment is a numpy array
             import numpy as np
-            if isinstance(segment, np.ndarray):
-                segment = torch.from_numpy(segment)
-            if segment.dim() == 1:
-                segment = segment.unsqueeze(0)
+            if not isinstance(segment, np.ndarray):
+                # If it's a tensor, convert to numpy
+                if hasattr(segment, 'cpu'):
+                    segment = segment.cpu().numpy()
+                else:
+                    segment = np.array(segment)
+            
+            # Ensure 2D array (channels, samples)
+            if segment.ndim == 1:
+                segment = segment[np.newaxis, :]
                 
             audio_segments.append(segment)
             
         # Concatenate audio segments
         if len(audio_segments) > 1:
-            # Assuming audio is a tensor, concatenate along the last dimension (time)
-            full_audio = torch.cat(audio_segments, dim=-1)
+            # Concatenate along the last axis (time)
+            full_audio = np.concatenate(audio_segments, axis=-1)
         else:
             full_audio = audio_segments[0]
         
