@@ -261,66 +261,61 @@ async def generate_speech(request: TTSRequest):
         
         logger.info(f"Audio validation: shape={full_audio.shape}, dtype={full_audio.dtype}, size={full_audio.size}")
         
-        # Fix audio shape: soundfile expects (samples, channels) format
-        # We're concatenating along the last axis, so if segments are (channels, samples),
-        # the result is (channels, total_samples), which needs to be transposed to (total_samples, channels)
-        if full_audio.ndim == 1:
-            # 1D array (samples,) - convert to 2D (samples, 1) for mono
-            # This ensures soundfile can access shape[1] for channels
-            full_audio = full_audio[:, np.newaxis]
-            logger.info(f"Converted 1D audio to 2D mono format: {full_audio.shape}")
-        elif full_audio.ndim == 2:
-            # 2D array - need to determine if it's (channels, samples) or (samples, channels)
-            # soundfile.write() expects (samples, channels)
-            # Since we concatenated along axis=-1 with shape (channels, samples),
-            # we likely have (channels, samples) and need to transpose
-            dim0, dim1 = full_audio.shape
-            # Heuristic: if first dim is small (1-2 channels) and second is much larger (samples),
-            # it's likely (channels, samples) - transpose it
-            # Also check: if dim0 < dim1 and dim0 <= 2, likely (channels, samples)
-            if dim0 < dim1 and dim0 <= 2:
-                full_audio = full_audio.T
-                logger.info(f"Transposed audio from ({dim0}, {dim1}) to ({full_audio.shape[0]}, {full_audio.shape[1]})")
-            elif dim1 < dim0 and dim1 <= 2:
-                # Already (samples, channels) format
-                logger.debug(f"Audio already in correct format (samples, channels): {full_audio.shape}")
-            else:
-                # Ambiguous case - try to infer from typical audio dimensions
-                # Audio samples are usually much larger than channels
-                # If dim0 is much smaller, assume (channels, samples)
-                if dim0 < dim1:
-                    full_audio = full_audio.T
-                    logger.info(f"Transposed ambiguous shape ({dim0}, {dim1}) to ({full_audio.shape[0]}, {full_audio.shape[1]})")
-        else:
-            logger.warning(f"Unexpected audio dimensions: {full_audio.ndim}, shape: {full_audio.shape}")
-            # Try to reshape to 2D
-            if full_audio.ndim > 2:
-                # Flatten to 2D, keeping the last dimension
-                full_audio = full_audio.reshape(-1, full_audio.shape[-1])
-                logger.info(f"Reshaped multi-dimensional audio to: {full_audio.shape}")
-                # Now check if we need to transpose
-                if full_audio.shape[0] < full_audio.shape[1] and full_audio.shape[0] <= 2:
-                    full_audio = full_audio.T
-                    logger.info(f"Transposed after reshape: {full_audio.shape}")
-        
-        logger.info(f"Final audio shape for saving: {full_audio.shape}")
-        
-        # Convert back to torch tensor if model.save_audio expects it
-        # Try to match the format that model.generate() returns
-        audio_for_save = full_audio
-        try:
+        # CRITICAL: Ensure audio is always 2D numpy array with shape (samples, channels)
+        # soundfile.write() requires shape[1] to exist for channels
+        # Convert to numpy if it's not already
+        if not isinstance(full_audio, np.ndarray):
             import torch
-            # Check if we need to convert to torch tensor
-            # model.save_audio might expect torch tensor format
-            if isinstance(full_audio, np.ndarray):
-                # Convert numpy to torch tensor
-                audio_for_save = torch.from_numpy(full_audio)
-                logger.debug(f"Converted audio to torch tensor: {audio_for_save.shape}, dtype={audio_for_save.dtype}")
-        except ImportError:
-            logger.debug("Torch not available, using numpy array")
-        except Exception as conv_error:
-            logger.warning(f"Could not convert to torch tensor, using numpy array: {conv_error}")
-            audio_for_save = full_audio
+            if isinstance(full_audio, torch.Tensor):
+                full_audio = full_audio.cpu().numpy()
+                logger.info(f"Converted torch tensor to numpy: {full_audio.shape}")
+            else:
+                full_audio = np.array(full_audio)
+                logger.info(f"Converted to numpy array: {full_audio.shape}")
+        
+        # Ensure 2D shape: (samples, channels)
+        if full_audio.ndim == 1:
+            # 1D array -> (samples, 1)
+            full_audio = full_audio[:, np.newaxis]
+            logger.info(f"Converted 1D to 2D: {full_audio.shape}")
+        elif full_audio.ndim == 2:
+            # Check if we need to transpose from (channels, samples) to (samples, channels)
+            dim0, dim1 = full_audio.shape
+            # If first dimension is small (1-2) and second is much larger, likely (channels, samples)
+            if dim0 <= 2 and dim1 > dim0 * 100:
+                full_audio = full_audio.T
+                logger.info(f"Transposed from ({dim0}, {dim1}) to {full_audio.shape}")
+            # Verify final shape makes sense: samples should be much larger than channels
+            final_samples, final_channels = full_audio.shape
+            if final_samples < final_channels:
+                # Still wrong, transpose again
+                full_audio = full_audio.T
+                logger.warning(f"Shape still wrong, transposed again to {full_audio.shape}")
+        else:
+            # More than 2D - reshape to 2D
+            logger.warning(f"Audio has {full_audio.ndim} dimensions, reshaping to 2D")
+            # Flatten all but the last dimension, or reshape to (total_samples, 1)
+            if full_audio.size > 0:
+                full_audio = full_audio.reshape(-1, 1)
+                logger.info(f"Reshaped to: {full_audio.shape}")
+        
+        # Final check: must be 2D with shape (samples, channels) where samples >> channels
+        if full_audio.ndim != 2:
+            logger.error(f"CRITICAL: Audio is not 2D! Shape: {full_audio.shape}, ndim: {full_audio.ndim}")
+            full_audio = full_audio.reshape(-1, 1)
+            logger.warning(f"Force reshaped to: {full_audio.shape}")
+        
+        samples, channels = full_audio.shape
+        if samples < channels:
+            logger.error(f"CRITICAL: samples ({samples}) < channels ({channels}) - transposing!")
+            full_audio = full_audio.T
+            samples, channels = full_audio.shape
+        
+        logger.info(f"Final audio shape: {full_audio.shape} (samples={samples}, channels={channels})")
+        
+        # Use numpy array directly - don't convert to torch tensor
+        # model.save_audio() should handle numpy arrays correctly
+        audio_for_save = full_audio
         
         # Save to temporary file
         try:
@@ -335,21 +330,34 @@ async def generate_speech(request: TTSRequest):
             logger.error(f"Error saving audio file: {e}", exc_info=True)
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            # Try with numpy array if torch tensor failed
-            try:
-                import torch
-                if isinstance(audio_for_save, torch.Tensor):
-                    logger.info("Retrying with numpy array format...")
-                    try:
-                        model.save_audio(full_audio, tmp_path)
-                        logger.info(f"Audio saved successfully with numpy format to {tmp_path}")
-                    except Exception as e2:
-                        logger.error(f"Error saving with numpy format: {e2}", exc_info=True)
-                        raise HTTPException(status_code=500, detail=f"Error saving audio: {str(e2)}")
-                else:
-                    raise HTTPException(status_code=500, detail=f"Error saving audio: {str(e)}")
-            except ImportError:
-                # Torch not available, just raise the original error
+            # Log the shape that caused the error
+            if hasattr(audio_for_save, 'shape'):
+                logger.error(f"Audio shape that caused error: {audio_for_save.shape}, ndim: {len(audio_for_save.shape) if hasattr(audio_for_save, 'shape') else 'N/A'}")
+            # Try to fix and retry if it's a shape issue
+            if "tuple index out of range" in str(e) or "shape" in str(e).lower():
+                logger.info("Attempting to fix shape and retry...")
+                try:
+                    # Ensure it's a numpy array with correct shape
+                    if not isinstance(audio_for_save, np.ndarray):
+                        import torch
+                        if isinstance(audio_for_save, torch.Tensor):
+                            audio_for_save = audio_for_save.cpu().numpy()
+                    
+                    # Force 2D shape
+                    if audio_for_save.ndim == 1:
+                        audio_for_save = audio_for_save[:, np.newaxis]
+                    elif audio_for_save.ndim == 2:
+                        s, c = audio_for_save.shape
+                        if s < c:
+                            audio_for_save = audio_for_save.T
+                    
+                    logger.info(f"Retrying with fixed shape: {audio_for_save.shape}")
+                    model.save_audio(audio_for_save, tmp_path)
+                    logger.info(f"Audio saved successfully after shape fix to {tmp_path}")
+                except Exception as e2:
+                    logger.error(f"Error saving after shape fix: {e2}", exc_info=True)
+                    raise HTTPException(status_code=500, detail=f"Error saving audio: {str(e2)}")
+            else:
                 raise HTTPException(status_code=500, detail=f"Error saving audio: {str(e)}")
         
         # Calculate and log total generation time
