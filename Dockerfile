@@ -47,5 +47,8 @@ RUN pip install fastapi==0.115.6 uvicorn[standard]==0.34.0 python-multipart==0.0
 EXPOSE 7860
 EXPOSE 8000
 
+# Copy API server code
+COPY api.py .
+
 # Default command to run the simple example
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
