@@ -14,6 +14,10 @@ import tempfile
 import os
 from pathlib import Path
 import logging
+import warnings
+
+# Suppress specific warnings
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*weight_norm.*")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
