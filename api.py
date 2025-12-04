@@ -163,14 +163,19 @@ async def generate_speech(request: TTSRequest):
         import torch
         if request.seed is not None:
             torch.manual_seed(request.seed)
-            
-        # Text chunking logic
+        
+        # Enable inference mode and other optimizations for faster generation
+        torch.set_grad_enabled(False)  # Disable gradients for inference
+        
+        # Text chunking logic - use larger chunks for better performance
         import re
         # Split by sentence endings (. ! ?)
         sentences = re.split(r'(?<=[.!?])\s+', request.text)
         chunks = []
         current_chunk = ""
-        max_chars = 400  # Conservative limit to avoid context window issues
+        # Increased chunk size for better performance (fewer chunks = faster)
+        # max_new_tokens is 3072 by default, so we can use larger chunks
+        max_chars = min(800, request.max_new_tokens // 4)  # Adaptive chunk size based on max_tokens
         
         for sentence in sentences:
             if len(current_chunk) + len(sentence) < max_chars:
@@ -185,49 +190,55 @@ async def generate_speech(request: TTSRequest):
         if not chunks:
             chunks = [request.text]
             
-        logger.info(f"Split text into {len(chunks)} chunks for generation")
+        logger.info(f"Split text into {len(chunks)} chunk(s) for generation")
         
         audio_segments = []
-        for i, chunk in enumerate(chunks):
-            chunk_start_time = time.time()
-            logger.info(f"Generating chunk {i+1}/{len(chunks)}: {chunk[:50]}...")
-            
-            # Generate audio for chunk
-            segment = model.generate(
-                chunk,
-                cfg_scale=request.guidance_scale,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                max_tokens=request.max_new_tokens,
-                cfg_filter_top_k=request.top_k
-            )
-            
-            chunk_elapsed_time = time.time() - chunk_start_time
-            logger.info(f"Chunk {i+1}/{len(chunks)} generated in {chunk_elapsed_time:.2f} seconds")
-            
-            # Ensure segment is a numpy array
-            if not isinstance(segment, np.ndarray):
-                # If it's a tensor, convert to numpy
-                if hasattr(segment, 'cpu'):
-                    segment = segment.cpu().numpy()
-                else:
-                    segment = np.array(segment)
-            
-            # Ensure 2D array (channels, samples)
-            if segment.ndim == 1:
-                segment = segment[np.newaxis, :]
+        # Use torch inference mode for faster generation (disables autograd)
+        with torch.inference_mode():
+            for i, chunk in enumerate(chunks):
+                chunk_start_time = time.time()
+                if len(chunks) > 1:
+                    logger.info(f"Generating chunk {i+1}/{len(chunks)}...")
                 
-            audio_segments.append(segment)
-            logger.debug(f"Chunk {i+1} shape: {segment.shape}, dtype: {segment.dtype}")
+                # Generate audio for chunk
+                segment = model.generate(
+                    chunk,
+                    cfg_scale=request.guidance_scale,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    max_tokens=request.max_new_tokens,
+                    cfg_filter_top_k=request.top_k
+                )
+                
+                chunk_elapsed_time = time.time() - chunk_start_time
+                if len(chunks) > 1:
+                    logger.info(f"Chunk {i+1}/{len(chunks)} completed in {chunk_elapsed_time:.2f}s")
             
+                # Optimize conversion: only convert if necessary, avoid unnecessary CPU transfers
+                if not isinstance(segment, np.ndarray):
+                    # If it's a tensor, convert to numpy efficiently
+                    if hasattr(segment, 'cpu'):
+                        # Only move to CPU if on GPU, otherwise use .numpy() directly
+                        if hasattr(segment, 'is_cuda') and segment.is_cuda:
+                            segment = segment.cpu().numpy()
+                        else:
+                            segment = segment.numpy()
+                    else:
+                        segment = np.array(segment)
+                
+                # Ensure 2D array (channels, samples)
+                if segment.ndim == 1:
+                    segment = segment[np.newaxis, :]
+                    
+                audio_segments.append(segment)
+                logger.debug(f"Chunk {i+1} shape: {segment.shape}, dtype: {segment.dtype}")
+        
         # Concatenate audio segments
         try:
             if len(audio_segments) > 1:
-                logger.info(f"Concatenating {len(audio_segments)} audio segments...")
                 # Ensure all segments have the same shape except for the time dimension
                 # Get the reference shape from the first segment
                 ref_shape = audio_segments[0].shape
-                logger.debug(f"Reference shape: {ref_shape}")
                 
                 # Verify all segments have compatible shapes
                 for i, seg in enumerate(audio_segments):
@@ -246,10 +257,8 @@ async def generate_speech(request: TTSRequest):
                 
                 # Concatenate along the last axis (time)
                 full_audio = np.concatenate(audio_segments, axis=-1)
-                logger.info(f"Concatenation successful. Final shape: {full_audio.shape}")
             else:
                 full_audio = audio_segments[0]
-                logger.info(f"Single segment, no concatenation needed. Shape: {full_audio.shape}")
         except Exception as e:
             logger.error(f"Error during audio concatenation: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Error concatenating audio segments: {str(e)}")
@@ -259,8 +268,6 @@ async def generate_speech(request: TTSRequest):
             logger.error("Generated audio is empty or None")
             raise HTTPException(status_code=500, detail="Generated audio is empty")
         
-        logger.info(f"Audio validation: shape={full_audio.shape}, dtype={full_audio.dtype}, size={full_audio.size}")
-        
         # CRITICAL: Ensure audio is always 2D numpy array with shape (samples, channels)
         # soundfile.write() requires shape[1] to exist for channels
         # Convert to numpy if it's not already
@@ -268,50 +275,37 @@ async def generate_speech(request: TTSRequest):
             import torch
             if isinstance(full_audio, torch.Tensor):
                 full_audio = full_audio.cpu().numpy()
-                logger.info(f"Converted torch tensor to numpy: {full_audio.shape}")
             else:
                 full_audio = np.array(full_audio)
-                logger.info(f"Converted to numpy array: {full_audio.shape}")
         
         # Ensure 2D shape: (samples, channels)
         if full_audio.ndim == 1:
             # 1D array -> (samples, 1)
             full_audio = full_audio[:, np.newaxis]
-            logger.info(f"Converted 1D to 2D: {full_audio.shape}")
         elif full_audio.ndim == 2:
             # Check if we need to transpose from (channels, samples) to (samples, channels)
             dim0, dim1 = full_audio.shape
             # If first dimension is small (1-2) and second is much larger, likely (channels, samples)
             if dim0 <= 2 and dim1 > dim0 * 100:
                 full_audio = full_audio.T
-                logger.info(f"Transposed from ({dim0}, {dim1}) to {full_audio.shape}")
             # Verify final shape makes sense: samples should be much larger than channels
             final_samples, final_channels = full_audio.shape
             if final_samples < final_channels:
                 # Still wrong, transpose again
                 full_audio = full_audio.T
-                logger.warning(f"Shape still wrong, transposed again to {full_audio.shape}")
         else:
             # More than 2D - reshape to 2D
-            logger.warning(f"Audio has {full_audio.ndim} dimensions, reshaping to 2D")
-            # Flatten all but the last dimension, or reshape to (total_samples, 1)
             if full_audio.size > 0:
                 full_audio = full_audio.reshape(-1, 1)
-                logger.info(f"Reshaped to: {full_audio.shape}")
         
         # Final check: must be 2D with shape (samples, channels) where samples >> channels
         if full_audio.ndim != 2:
-            logger.error(f"CRITICAL: Audio is not 2D! Shape: {full_audio.shape}, ndim: {full_audio.ndim}")
             full_audio = full_audio.reshape(-1, 1)
-            logger.warning(f"Force reshaped to: {full_audio.shape}")
         
         samples, channels = full_audio.shape
         if samples < channels:
-            logger.error(f"CRITICAL: samples ({samples}) < channels ({channels}) - transposing!")
             full_audio = full_audio.T
             samples, channels = full_audio.shape
-        
-        logger.info(f"Final audio shape: {full_audio.shape} (samples={samples}, channels={channels})")
         
         # Use numpy array directly - don't convert to torch tensor
         # model.save_audio() should handle numpy arrays correctly
@@ -319,13 +313,10 @@ async def generate_speech(request: TTSRequest):
         
         # Save to temporary file
         try:
-            logger.info(f"Saving audio to temporary file (format: {request.output_format})...")
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{request.output_format}") as tmp_file:
                 tmp_path = tmp_file.name
             # Save outside the context manager to ensure file is closed
-            logger.debug(f"Calling model.save_audio with shape {full_audio.shape if hasattr(full_audio, 'shape') else type(full_audio)}")
             model.save_audio(audio_for_save, tmp_path)
-            logger.info(f"Audio saved successfully to {tmp_path}")
         except Exception as e:
             logger.error(f"Error saving audio file: {e}", exc_info=True)
             import traceback
