@@ -30,7 +30,7 @@ services:
     # Port mapping for Gradio web interface and FastAPI
     ports:
       - "7860:7860"
-      - "8000:8000"
+      - "8081:8080"
     
     # Keep container running for interactive use
     stdin_open: true
