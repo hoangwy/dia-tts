@@ -15,6 +15,8 @@ import os
 from pathlib import Path
 import logging
 import warnings
+import time
+import numpy as np
 
 # Suppress specific warnings
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*weight_norm.*")
@@ -153,6 +155,9 @@ async def generate_speech(request: TTSRequest):
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
+    # Record start time for generation
+    generation_start_time = time.time()
+    
     try:
         # Set seed if provided
         import torch
@@ -184,6 +189,7 @@ async def generate_speech(request: TTSRequest):
         
         audio_segments = []
         for i, chunk in enumerate(chunks):
+            chunk_start_time = time.time()
             logger.info(f"Generating chunk {i+1}/{len(chunks)}: {chunk[:50]}...")
             
             # Generate audio for chunk
@@ -196,8 +202,10 @@ async def generate_speech(request: TTSRequest):
                 cfg_filter_top_k=request.top_k
             )
             
+            chunk_elapsed_time = time.time() - chunk_start_time
+            logger.info(f"Chunk {i+1}/{len(chunks)} generated in {chunk_elapsed_time:.2f} seconds")
+            
             # Ensure segment is a numpy array
-            import numpy as np
             if not isinstance(segment, np.ndarray):
                 # If it's a tensor, convert to numpy
                 if hasattr(segment, 'cpu'):
@@ -210,18 +218,99 @@ async def generate_speech(request: TTSRequest):
                 segment = segment[np.newaxis, :]
                 
             audio_segments.append(segment)
+            logger.debug(f"Chunk {i+1} shape: {segment.shape}, dtype: {segment.dtype}")
             
         # Concatenate audio segments
-        if len(audio_segments) > 1:
-            # Concatenate along the last axis (time)
-            full_audio = np.concatenate(audio_segments, axis=-1)
-        else:
-            full_audio = audio_segments[0]
+        try:
+            if len(audio_segments) > 1:
+                logger.info(f"Concatenating {len(audio_segments)} audio segments...")
+                # Ensure all segments have the same shape except for the time dimension
+                # Get the reference shape from the first segment
+                ref_shape = audio_segments[0].shape
+                logger.debug(f"Reference shape: {ref_shape}")
+                
+                # Verify all segments have compatible shapes
+                for i, seg in enumerate(audio_segments):
+                    if seg.shape[:-1] != ref_shape[:-1]:
+                        logger.warning(f"Segment {i} shape {seg.shape} doesn't match reference {ref_shape}")
+                        # Reshape to match if needed
+                        if seg.ndim != len(ref_shape):
+                            if seg.ndim == 1 and len(ref_shape) == 2:
+                                seg = seg[np.newaxis, :]
+                            elif seg.ndim == 2 and len(ref_shape) == 1:
+                                seg = seg[0] if seg.shape[0] == 1 else seg
+                        # Ensure channel dimension matches
+                        if seg.shape[0] != ref_shape[0] and ref_shape[0] == 1:
+                            seg = seg[:1] if seg.shape[0] > 1 else seg
+                        audio_segments[i] = seg
+                
+                # Concatenate along the last axis (time)
+                full_audio = np.concatenate(audio_segments, axis=-1)
+                logger.info(f"Concatenation successful. Final shape: {full_audio.shape}")
+            else:
+                full_audio = audio_segments[0]
+                logger.info(f"Single segment, no concatenation needed. Shape: {full_audio.shape}")
+        except Exception as e:
+            logger.error(f"Error during audio concatenation: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Error concatenating audio segments: {str(e)}")
+        
+        # Validate audio before saving
+        if full_audio is None or full_audio.size == 0:
+            logger.error("Generated audio is empty or None")
+            raise HTTPException(status_code=500, detail="Generated audio is empty")
+        
+        logger.info(f"Audio validation: shape={full_audio.shape}, dtype={full_audio.dtype}, size={full_audio.size}")
+        
+        # Convert back to torch tensor if model.save_audio expects it
+        # Try to match the format that model.generate() returns
+        audio_for_save = full_audio
+        try:
+            import torch
+            # Check if we need to convert to torch tensor
+            # model.save_audio might expect torch tensor format
+            if isinstance(full_audio, np.ndarray):
+                # Convert numpy to torch tensor
+                audio_for_save = torch.from_numpy(full_audio)
+                logger.debug(f"Converted audio to torch tensor: {audio_for_save.shape}, dtype={audio_for_save.dtype}")
+        except ImportError:
+            logger.debug("Torch not available, using numpy array")
+        except Exception as conv_error:
+            logger.warning(f"Could not convert to torch tensor, using numpy array: {conv_error}")
+            audio_for_save = full_audio
         
         # Save to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{request.output_format}") as tmp_file:
-            tmp_path = tmp_file.name
-            model.save_audio(full_audio, tmp_path)
+        try:
+            logger.info(f"Saving audio to temporary file (format: {request.output_format})...")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{request.output_format}") as tmp_file:
+                tmp_path = tmp_file.name
+            # Save outside the context manager to ensure file is closed
+            logger.debug(f"Calling model.save_audio with shape {full_audio.shape if hasattr(full_audio, 'shape') else type(full_audio)}")
+            model.save_audio(audio_for_save, tmp_path)
+            logger.info(f"Audio saved successfully to {tmp_path}")
+        except Exception as e:
+            logger.error(f"Error saving audio file: {e}", exc_info=True)
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Try with numpy array if torch tensor failed
+            try:
+                import torch
+                if isinstance(audio_for_save, torch.Tensor):
+                    logger.info("Retrying with numpy array format...")
+                    try:
+                        model.save_audio(full_audio, tmp_path)
+                        logger.info(f"Audio saved successfully with numpy format to {tmp_path}")
+                    except Exception as e2:
+                        logger.error(f"Error saving with numpy format: {e2}", exc_info=True)
+                        raise HTTPException(status_code=500, detail=f"Error saving audio: {str(e2)}")
+                else:
+                    raise HTTPException(status_code=500, detail=f"Error saving audio: {str(e)}")
+            except ImportError:
+                # Torch not available, just raise the original error
+                raise HTTPException(status_code=500, detail=f"Error saving audio: {str(e)}")
+        
+        # Calculate and log total generation time
+        total_elapsed_time = time.time() - generation_start_time
+        logger.info(f"TTS generation completed in {total_elapsed_time:.2f} seconds (total time)")
         
         # Handle different output formats
         if request.output_format == "base64":
