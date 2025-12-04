@@ -154,27 +154,60 @@ async def generate_speech(request: TTSRequest):
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     try:
-        logger.info(f"Generating speech for text: {request.text[:50]}...")
-        
         # Set seed if provided
         import torch
         if request.seed is not None:
             torch.manual_seed(request.seed)
+            
+        # Text chunking logic
+        import re
+        # Split by sentence endings (. ! ?)
+        sentences = re.split(r'(?<=[.!?])\s+', request.text)
+        chunks = []
+        current_chunk = ""
+        max_chars = 400  # Conservative limit to avoid context window issues
         
-        # Generate audio
-        audio = model.generate(
-            request.text,
-            guidance_scale=request.guidance_scale,
-            temperature=request.temperature,
-            top_p=request.top_p,
-            top_k=request.top_k,
-            max_new_tokens=request.max_new_tokens
-        )
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) < max_chars:
+                current_chunk += sentence + " "
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + " "
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+            
+        if not chunks:
+            chunks = [request.text]
+            
+        logger.info(f"Split text into {len(chunks)} chunks for generation")
+        
+        audio_segments = []
+        for i, chunk in enumerate(chunks):
+            logger.info(f"Generating chunk {i+1}/{len(chunks)}: {chunk[:50]}...")
+            
+            # Generate audio for chunk
+            segment = model.generate(
+                chunk,
+                guidance_scale=request.guidance_scale,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                top_k=request.top_k,
+                max_new_tokens=request.max_new_tokens
+            )
+            audio_segments.append(segment)
+            
+        # Concatenate audio segments
+        if len(audio_segments) > 1:
+            # Assuming audio is a tensor, concatenate along the last dimension (time)
+            full_audio = torch.cat(audio_segments, dim=-1)
+        else:
+            full_audio = audio_segments[0]
         
         # Save to temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{request.output_format}") as tmp_file:
             tmp_path = tmp_file.name
-            model.save_audio(audio, tmp_path)
+            model.save_audio(full_audio, tmp_path)
         
         # Handle different output formats
         if request.output_format == "base64":

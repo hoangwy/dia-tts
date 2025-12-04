@@ -87,9 +87,9 @@ else:
 ### cURL
 
 ```bash
-curl -X POST http://localhost:8000/api/tts/generate \
+curl -X POST http://163.5.212.63:27623/api/tts/generate \
   -H "Content-Type: application/json" \
-  -d '{"text": "[S1] Hello from cURL!", "output_format": "mp3"}' \
+  -d '{"text": "On December 3rd, The Early Signing Period is officially underway, and the Louisville Cardinals football program is buzzing with activity. Coaches Jeff Brohm and Vince Marrow have been working tirelessly, securing over twenty verbal commitments. Today is the day these promising young athletes make their decisions official by signing their letters of intent. This period is always a whirlwind of emotions for fans and coaches alike. While some players might decommit and choose another school, there's also the excitement of recruits flipping their commitments to join the Cardinals. It's a dynamic day filled with constant updates, and we're here to keep you informed every step of the way. Among the notable early signees are Jarvis Strickland, a four-star offensive tackle from Paducah, Kentucky, and Julius Miles, another four-star talent playing wide receiver from Freeport, Florida. These top recruits are expected to make a significant impact on the team in the coming seasons. Additionally, the Cardinals have secured commitments from several other promising players. These include Taj Powell, a three-star linebacker from Ohio, and Sam Dawson, a three-star defensive lineman from Crestwood, Kentucky. The roster is shaping up with a strong mix of talent across various positions. As the day progresses, we'll continue to monitor all the signings and provide updates on every player who officially joins the Louisville Cardinals during this crucial Early Signing Period.", "output_format": "mp3"}' \
   --output curl_test.mp3
 ```
 
