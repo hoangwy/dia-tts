@@ -45,10 +45,10 @@ RUN pip install fastapi==0.115.6 uvicorn[standard]==0.34.0 python-multipart==0.0
 
 # Expose port for Gradio app (7860) and FastAPI (8000)
 EXPOSE 7860
-EXPOSE 8000
+EXPOSE 8081
 
 # Copy API server code
 COPY api.py .
 
 # Default command to run the simple example
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8081"]
